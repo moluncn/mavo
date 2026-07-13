@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build and publish MaVo
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun swift --version
+
+      - name: Run tests
+        run: scripts/run_tests.sh
+
+      - name: Build and verify app archive
+        run: |
+          MAVO_VERSION="${GITHUB_REF_NAME#v}" scripts/build_app.sh
+
+      - name: Create checksum
+        working-directory: outputs
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="MaVo-$version-arm64.zip"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          shasum -a 256 -c "$archive.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="outputs/MaVo-$version-arm64.zip"
+          checksum="$archive.sha256"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "$archive" \
+              "$checksum"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "MaVo $version" \
+              --generate-notes \
+              "$archive" \
+              "$checksum"
+          fi

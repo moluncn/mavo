@@ -1,0 +1,38 @@
+{
+  "formatVersion": 1,
+  "runtimeVersion": "qdc507-3.18.44-voice-20260712.5",
+  "kernelRelease": "3.18.44",
+  "cardName": "mdm9607-tomtom-i2s-snd-card",
+  "helper": "mavo-pcm-bridge.armv7",
+  "files": [
+    {
+      "name": "qdc507_aprv3.ko",
+      "mode": 420
+    },
+    {
+      "name": "qdc507_voice.ko",
+      "mode": 420
+    },
+    {
+      "name": "mavo-pcm-bridge.armv7",
+      "mode": 493
+    }
+  ],
+  "modules": [
+    {
+      "file": "qdc507_aprv3.ko",
+      "name": "qdc507_aprv3"
+    },
+    {
+      "file": "qdc507_voice.ko",
+      "name": "qdc507_voice"
+    }
+  ],
+  "requiredDevices": [
+    "/dev/snd/controlC0",
+    "/dev/snd/pcmC0D4p",
+    "/dev/snd/pcmC0D4c",
+    "/dev/snd/pcmC0D5p",
+    "/dev/snd/pcmC0D6c"
+  ]
+}

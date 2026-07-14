@@ -62,6 +62,10 @@ final class ModemService {
         label: "app.mavo.mac.modem.shutdown",
         qos: .userInitiated
     )
+    private let interfaceContentionQueue = DispatchQueue(
+        label: "app.mavo.mac.usb-contention",
+        qos: .userInitiated
+    )
     private let modemHandleLock = NSLock()
     private let voiceAudio = VoiceAudioService()
     private var timer: DispatchSourceTimer?
@@ -106,6 +110,8 @@ final class ModemService {
     private var qdcMediaStartInFlight = false
     private var needsPostCallInitialization = false
     private var isShuttingDown = false
+    private var qdcInitializationRetryGeneration: UInt64 = 0
+    private var qdcInitializationRetryAttempts = 0
 
     init() {
         voiceAudio.onError = { [weak self] error in
@@ -248,6 +254,95 @@ final class ModemService {
             self.needsSIMRefresh = true
             self.tickNumber = 9
             self.tick()
+        }
+    }
+
+    func retryCallInitialization(completion: @escaping (ModemActionResult) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.isOpen else {
+                DispatchQueue.main.async { completion(.failure("模块尚未连接。")) }
+                return
+            }
+            guard !self.callSnapshot.hasCall,
+                  !self.hasPendingMediaCleanup,
+                  !self.callActionInFlight else {
+                DispatchQueue.main.async {
+                    completion(.failure("当前通话状态尚未清理完成，不能重新初始化。"))
+                }
+                return
+            }
+            switch self.queryCallPresence() {
+            case .empty:
+                break
+            case .present:
+                DispatchQueue.main.async {
+                    completion(.failure("模块中存在通话，不能重新初始化通话组件。"))
+                }
+                return
+            case let .unknown(error):
+                DispatchQueue.main.async {
+                    completion(.failure("无法确认模块通话状态：\(error)"))
+                }
+                return
+            case .differentDevice:
+                DispatchQueue.main.async {
+                    completion(.failure("原模块已断开，请重新插入后再试。"))
+                }
+                return
+            }
+
+            self.initializeConnectedModem()
+            let result: ModemActionResult = self.callSnapshot.voiceOverUSBSupported
+                ? .success("电话组件已就绪。")
+                : .failure(self.callSnapshot.lastError ?? "电话组件仍不可用。")
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func forceReleaseCallControlInterface(
+        completion: @escaping (ModemActionResult) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self, self.isOpen, self.modemLocationID != 0 else {
+                DispatchQueue.main.async { completion(.failure("模块尚未连接。")) }
+                return
+            }
+            guard self.callSnapshot.controlInterfaceBusy else {
+                DispatchQueue.main.async {
+                    completion(.failure("当前没有检测到可结束的接口占用。"))
+                }
+                return
+            }
+            self.cancelQDCInitializationRetry()
+            let locationID = self.modemLocationID
+            self.interfaceContentionQueue.async { [weak self] in
+                guard let self else { return }
+                let release = USBInterfaceContentionResolver.forceReleaseADBInterface(
+                    locationID: locationID
+                )
+                guard let release else {
+                    // The owner may have exited between the UI update and the
+                    // click. Retry directly instead of reporting a stale error.
+                    self.retryCallInitialization(completion: completion)
+                    return
+                }
+                guard release.terminated else {
+                    DispatchQueue.main.async { completion(.failure(release.message)) }
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+                self.retryCallInitialization { result in
+                    switch result {
+                    case let .success(message):
+                        let detail = [release.message, message]
+                            .compactMap { $0 }
+                            .joined(separator: " ")
+                        completion(.success(detail))
+                    case let .failure(message):
+                        completion(.failure("\(release.message) 但电话初始化仍失败：\(message)"))
+                    }
+                }
+            }
         }
     }
 
@@ -1845,6 +1940,7 @@ final class ModemService {
         callSnapshot.startedAt = nil
         callSnapshot.lastEndReason = reason
         callSnapshot.lastError = error
+        callSnapshot.controlInterfaceBusy = false
         callPollMisses = 0
         callStateChangedAt = Date()
         publishCallSnapshot()
@@ -1852,6 +1948,7 @@ final class ModemService {
 
     private func resetCallConnectionState(disconnected: Bool) {
         let hadCall = callSnapshot.hasCall
+        cancelQDCInitializationRetry()
         cancelPendingQDCMediaSession()
         voiceAudio.stop()
         pcmSessionEnabled = false
@@ -2142,6 +2239,7 @@ final class ModemService {
 
     private func initializeConnectedModem() {
         guard let modem else { return }
+        cancelQDCInitializationRetry()
         didQuerySIMIdentity = false
         snapshot = ModemSnapshot(
             state: .connecting,
@@ -2181,6 +2279,7 @@ final class ModemService {
             modemLocationID != 0
         var mediaAvailable = false
         var mediaError: String?
+        var shouldRetryQDCInitialization = false
         moduleVoiceRuntime = nil
         switch CallATParser.preferredMediaBackend(
             firmwareIdentity: firmwareIdentity,
@@ -2201,6 +2300,7 @@ final class ModemService {
             } catch {
                 callMediaBackend = .none
                 mediaError = "QDC507 通话组件尚不可用：\(error.localizedDescription)"
+                shouldRetryQDCInitialization = ADBModuleController.isInterfaceBusyError(error)
             }
         case .qpcmv:
             let reset = command("AT+QPCMV=0", timeout: 3_000)
@@ -2220,9 +2320,13 @@ final class ModemService {
             voiceOverUSBSupported: mediaAvailable,
             lastError: mediaAvailable
                 ? nil
-                : (mediaError ?? "固件未报告可用的 USB 通话媒体通道。")
+                : (mediaError ?? "固件未报告可用的 USB 通话媒体通道。"),
+            controlInterfaceBusy: shouldRetryQDCInitialization
         )
         publishCallSnapshot()
+        if shouldRetryQDCInitialization {
+            scheduleQDCInitializationRetry()
+        }
         let pduMode = command("AT+CMGF=0", timeout: 2_000)
         let indications = command("AT+CNMI=2,1,0,0,0", timeout: 2_000)
         let storage = command("AT+CPMS?", timeout: 3_000)
@@ -2250,6 +2354,68 @@ final class ModemService {
             : "模块已连接，但短信 PDU/CNMI 初始化失败。"
         refreshRadioSnapshot()
         needsImmediateMessagePoll = true
+    }
+
+    private func scheduleQDCInitializationRetry() {
+        guard let delay = ModuleVoiceInitializationRetryPolicy.delay(
+            forCompletedAttempts: qdcInitializationRetryAttempts
+        ) else {
+            return
+        }
+        let generation = qdcInitializationRetryGeneration
+        qdcInitializationRetryAttempts += 1
+        callSnapshot.lastError =
+            "模块控制接口正被其他 ADB 客户端占用；MaVo 将自动重试（" +
+            "\(qdcInitializationRetryAttempts)/5）。"
+        callSnapshot.controlInterfaceBusy = true
+        publishCallSnapshot()
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.qdcInitializationRetryGeneration == generation,
+                  self.isOpen,
+                  !self.isShuttingDown,
+                  !self.callSnapshot.hasCall,
+                  !self.hasPendingMediaCleanup,
+                  self.callSnapshot.phase == .unavailable else {
+                return
+            }
+            self.retryQDCInitializationAfterContention()
+        }
+    }
+
+    private func retryQDCInitializationAfterContention() {
+        moduleVoiceRuntime = nil
+        do {
+            let runtime = try ModuleVoiceRuntime(locationID: modemLocationID)
+            _ = try runtime.prepare()
+            try runtime.stopBridge()
+            moduleVoiceRuntime = runtime
+            callMediaBackend = .qdcUAC
+            pcmSessionEnabled = false
+            callSnapshot = CallSnapshot(
+                phase: .idle,
+                voiceOverUSBSupported: true
+            )
+            cancelQDCInitializationRetry()
+            publishCallSnapshot()
+        } catch {
+            callMediaBackend = .none
+            callSnapshot.phase = .unavailable
+            callSnapshot.voiceOverUSBSupported = false
+            callSnapshot.lastError = "QDC507 通话组件尚不可用：\(error.localizedDescription)"
+            callSnapshot.controlInterfaceBusy = ADBModuleController.isInterfaceBusyError(error)
+            publishCallSnapshot()
+            if ADBModuleController.isInterfaceBusyError(error) {
+                scheduleQDCInitializationRetry()
+            } else {
+                cancelQDCInitializationRetry()
+            }
+        }
+    }
+
+    private func cancelQDCInitializationRetry() {
+        qdcInitializationRetryGeneration &+= 1
+        qdcInitializationRetryAttempts = 0
     }
 
     private func refreshSIMSnapshot() {

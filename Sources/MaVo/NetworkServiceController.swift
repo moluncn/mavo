@@ -83,8 +83,23 @@ final class NetworkServiceController {
         let serviceName = SCNetworkServiceGetName(service) as String?
         let interface = SCNetworkServiceGetInterface(service)
         let bsdName = interface.flatMap { SCNetworkInterfaceGetBSDName($0) as String? }
-        let order = (SCNetworkSetGetServiceOrder(networkSet) as? [String]) ?? []
-        let activeIPv4 = bsdName.flatMap(activeIPv4Address)
+        let order = completeServiceOrder(networkSet)
+        let orderedServices = servicesByID(in: networkSet)
+        let higherPriorityService = serviceID.flatMap { targetID -> SCNetworkService? in
+            guard let targetIndex = order.firstIndex(of: targetID) else { return nil }
+            return order[..<targetIndex]
+                .compactMap { orderedServices[$0] }
+                .first(where: SCNetworkServiceGetEnabled)
+        }
+        let isPrioritized = serviceID.map { targetID in
+            guard let targetIndex = order.firstIndex(of: targetID) else { return false }
+            return !order[..<targetIndex]
+                .compactMap { orderedServices[$0] }
+                .contains(where: SCNetworkServiceGetEnabled)
+        } ?? false
+        let ipv4State = activeIPv4State(serviceID: serviceID, bsdName: bsdName)
+        let activeIPv4 = ipv4State.address
+        let activeIPv4Router = ipv4State.router
         let activeIPv6 = bsdName.flatMap(activeGlobalIPv6Address)
         let linkActive = bsdName.flatMap(activeLinkStatus) ??
             (activeIPv4 != nil || activeIPv6 != nil)
@@ -98,13 +113,17 @@ final class NetworkServiceController {
         return CellularNetworkStatus(
             serviceID: serviceID,
             serviceName: serviceName,
+            higherPriorityServiceName: higherPriorityService.map(userFacingServiceName),
             bsdName: bsdName,
             isEnabled: SCNetworkServiceGetEnabled(service),
-            isActive: linkActive && (activeIPv4 != nil || activeIPv6 != nil),
+            isActive: linkActive && (
+                (activeIPv4 != nil && activeIPv4Router != nil) || activeIPv6 != nil
+            ),
             isLinkActive: linkActive,
-            isPrioritized: serviceID.map { order.first == $0 } ?? false,
+            isPrioritized: isPrioritized,
             isHardwarePresent: liveInterface != nil,
             ipv4Address: activeIPv4,
+            ipv4Router: activeIPv4Router,
             ipv6Address: activeIPv6,
             lastError: nil
         )
@@ -113,6 +132,42 @@ final class NetworkServiceController {
     private func services(in networkSet: SCNetworkSet) -> [SCNetworkService] {
         guard let rawServices = SCNetworkSetCopyServices(networkSet) else { return [] }
         return (rawServices as? [SCNetworkService]) ?? []
+    }
+
+    private func servicesByID(in networkSet: SCNetworkSet) -> [String: SCNetworkService] {
+        Dictionary(uniqueKeysWithValues: services(in: networkSet).compactMap { service in
+            guard let identifier = SCNetworkServiceGetServiceID(service) as String? else {
+                return nil
+            }
+            return (identifier, service)
+        })
+    }
+
+    private func completeServiceOrder(_ networkSet: SCNetworkSet) -> [String] {
+        let identifiers = services(in: networkSet)
+            .compactMap { SCNetworkServiceGetServiceID($0) as String? }
+        let validIdentifiers = Set(identifiers)
+        var order = ((SCNetworkSetGetServiceOrder(networkSet) as? [String]) ?? [])
+            .filter { validIdentifiers.contains($0) }
+        for identifier in identifiers where !order.contains(identifier) {
+            order.append(identifier)
+        }
+        return order
+    }
+
+    private func userFacingServiceName(_ service: SCNetworkService) -> String {
+        let rawName = (SCNetworkServiceGetName(service) as String?) ?? ""
+        let normalized = rawName.lowercased()
+        if normalized.contains("wi-fi") || normalized.contains("wifi") ||
+            normalized.contains("无线局域网") {
+            return "Wi‑Fi"
+        }
+        if let interface = SCNetworkServiceGetInterface(service),
+           (SCNetworkInterfaceGetInterfaceType(interface) as String?) ==
+            (kSCNetworkInterfaceTypeEthernet as String) {
+            return "以太网"
+        }
+        return rawName.isEmpty ? "其他网络" : rawName
     }
 
     private func findLiveModemService(in networkSet: SCNetworkSet) -> SCNetworkService? {
@@ -164,14 +219,32 @@ final class NetworkServiceController {
         return knownNames.contains { normalized.contains($0) }
     }
 
-    private func activeIPv4Address(forBSDName bsdName: String) -> String? {
-        let key = "State:/Network/Interface/\(bsdName)/IPv4" as NSString
-        guard let value = SCDynamicStoreCopyValue(nil, key),
-              let dictionary = value as? [String: Any],
-              let addresses = dictionary["Addresses"] as? [String] else {
-            return nil
+    private struct IPv4State {
+        let address: String?
+        let router: String?
+    }
+
+    private func activeIPv4State(serviceID: String?, bsdName: String?) -> IPv4State {
+        var serviceDictionary: [String: Any]?
+        if let serviceID {
+            let key = "State:/Network/Service/\(serviceID)/IPv4" as NSString
+            serviceDictionary = SCDynamicStoreCopyValue(nil, key) as? [String: Any]
         }
-        return addresses.first
+        let serviceAddress = (serviceDictionary?["Addresses"] as? [String])?
+            .first(where: NetworkAddressClassifier.isUsableIPv4)
+        let router = (serviceDictionary?["Router"] as? String).flatMap {
+            NetworkAddressClassifier.isUsableIPv4($0) ? $0 : nil
+        }
+        if serviceAddress != nil || router != nil {
+            return IPv4State(address: serviceAddress, router: router)
+        }
+
+        guard let bsdName else { return IPv4State(address: nil, router: nil) }
+        let key = "State:/Network/Interface/\(bsdName)/IPv4" as NSString
+        let dictionary = SCDynamicStoreCopyValue(nil, key) as? [String: Any]
+        let interfaceAddress = (dictionary?["Addresses"] as? [String])?
+            .first(where: NetworkAddressClassifier.isUsableIPv4)
+        return IPv4State(address: interfaceAddress, router: nil)
     }
 
     private func activeGlobalIPv6Address(forBSDName bsdName: String) -> String? {

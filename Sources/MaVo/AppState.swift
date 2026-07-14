@@ -42,6 +42,8 @@ final class AppState: ObservableObject {
     private var cellularLinkRecoveryTask: Task<Void, Never>?
     private var cellularLinkRecoveryInFlight = false
     private var completedCellularLinkRecoveryAttempts = 0
+    private var automaticPriorityInFlight = false
+    private var lastAutomaticPriorityAttemptServiceID: String?
     private var initialSetupPromptTask: Task<Void, Never>?
     private var initialSetupWasPresentedForCurrentInsertion = false
     private var initialSetupPresentationIsActive = false
@@ -136,6 +138,7 @@ final class AppState: ObservableObject {
                 previousSnapshot.usbIdentity != snapshot.usbIdentity {
                 self.networkController.refresh()
             }
+            self.automaticallyPrioritizeCellularIfNeeded()
         }
         modemService.onMessages = { [weak self] incoming, isInitialSync in
             guard let self else { return }
@@ -185,11 +188,15 @@ final class AppState: ObservableObject {
         networkController.onStatus = { [weak self] status in
             guard let self else { return }
             self.network = status
+            if !status.isEnabled || !status.isHardwarePresent || status.isPrioritized {
+                self.lastAutomaticPriorityAttemptServiceID = nil
+            }
             if status.isActive || !status.isEnabled || !status.isHardwarePresent {
                 self.cancelCellularLinkRecovery(resetAttempts: true)
             } else {
                 self.scheduleCellularLinkRecoveryIfNeeded()
             }
+            self.automaticallyPrioritizeCellularIfNeeded()
         }
 
         networkController.startMonitoring()
@@ -203,6 +210,28 @@ final class AppState: ObservableObject {
         networkController.refresh()
     }
 
+    func retryCallInitialization() {
+        guard !isChangingCall else { return }
+        isChangingCall = true
+        dismissTransientMessage()
+        modemService.retryCallInitialization { [weak self] result in
+            guard let self else { return }
+            self.isChangingCall = false
+            self.show(result)
+        }
+    }
+
+    func forceReleaseCallControlInterface() {
+        guard !isChangingCall, call.controlInterfaceBusy else { return }
+        isChangingCall = true
+        dismissTransientMessage()
+        modemService.forceReleaseCallControlInterface { [weak self] result in
+            guard let self else { return }
+            self.isChangingCall = false
+            self.show(result)
+        }
+    }
+
     func setCellularNetworking(_ enabled: Bool) {
         guard !isChangingNetwork else { return }
         if enabled && (!modem.isConnected || modem.usbNetMode != 1 || !network.isHardwarePresent) {
@@ -213,6 +242,7 @@ final class AppState: ObservableObject {
         if enabled {
             completedCellularLinkRecoveryAttempts = 0
         } else {
+            lastAutomaticPriorityAttemptServiceID = nil
             cancelCellularLinkRecovery(resetAttempts: true)
         }
         dismissTransientMessage()
@@ -220,6 +250,36 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.isChangingNetwork = false
             self.show(result)
+        }
+    }
+
+    private func automaticallyPrioritizeCellularIfNeeded() {
+        guard !automaticPriorityInFlight,
+              CellularNetworkPriorityPolicy.shouldAutoPromote(
+                  network: network,
+                  modem: modem,
+                  isChangingNetwork: isChangingNetwork,
+                  attemptedServiceID: lastAutomaticPriorityAttemptServiceID
+              ),
+              let serviceID = network.serviceID else {
+            return
+        }
+        automaticPriorityInFlight = true
+        lastAutomaticPriorityAttemptServiceID = serviceID
+        isChangingNetwork = true
+        networkController.setEnabled(true) { [weak self] result in
+            guard let self else { return }
+            self.automaticPriorityInFlight = false
+            self.isChangingNetwork = false
+            switch result {
+            case .success:
+                self.networkController.refresh()
+            case let .failure(message):
+                self.presentTransientMessage(
+                    "无法自动将蜂窝网络设为最高优先级：\(message)",
+                    isError: true
+                )
+            }
         }
     }
 
@@ -272,29 +332,45 @@ final class AppState: ObservableObject {
         modemService.recoverCellularNetworkLink { [weak self] result in
             guard let self else { return }
             self.cellularLinkRecoveryInFlight = false
-            self.isRecoveringNetworkLink = false
             switch result {
             case .success:
-                self.cellularLinkRecoveryTask = Task { [weak self] in
-                    do {
-                        try await Task.sleep(nanoseconds: 4_000_000_000)
-                    } catch {
-                        return
-                    }
+                self.networkController.setEnabled(true) { [weak self] dhcpResult in
                     guard let self else { return }
-                    self.networkController.refresh()
-                    do {
-                        try await Task.sleep(nanoseconds: 1_000_000_000)
-                    } catch {
-                        return
-                    }
-                    self.cellularLinkRecoveryTask = nil
-                    if !self.network.isActive {
-                        self.finishCellularLinkRecoveryAttempt()
+                    switch dhcpResult {
+                    case .success:
+                        self.verifyCellularLinkRecovery()
+                    case let .failure(message):
+                        self.isRecoveringNetworkLink = false
+                        self.finishCellularLinkRecoveryAttempt(
+                            error: "模块链路已恢复，但 macOS DHCP 刷新失败：\(message)"
+                        )
                     }
                 }
             case let .failure(message):
+                self.isRecoveringNetworkLink = false
                 self.finishCellularLinkRecoveryAttempt(error: message)
+            }
+        }
+    }
+
+    private func verifyCellularLinkRecovery() {
+        cellularLinkRecoveryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 8_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.networkController.refresh()
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+            self.cellularLinkRecoveryTask = nil
+            self.isRecoveringNetworkLink = false
+            if !self.network.isActive {
+                self.finishCellularLinkRecoveryAttempt()
             }
         }
     }

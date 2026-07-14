@@ -1,5 +1,6 @@
 import CModemBridge
 import Foundation
+import IOKit
 
 final class ADBModuleController {
     struct ShellResult {
@@ -9,6 +10,7 @@ final class ADBModuleController {
 
     enum ControllerError: LocalizedError {
         case openFailed(String)
+        case interfaceBusy
         case transport(String)
         case protocolViolation(String)
         case authenticationRequired
@@ -18,6 +20,9 @@ final class ADBModuleController {
         var errorDescription: String? {
             switch self {
             case let .openFailed(message): return message
+            case .interfaceBusy:
+                return "模块控制接口正被 adb、Android Studio 或另一份 MaVo 占用；" +
+                    "MaVo 已请求对方释放，但对方仍在使用。"
             case let .transport(message): return message
             case let .protocolViolation(message): return message
             case .authenticationRequired: return "模块 ADB 要求认证，无法自动控制通话组件。"
@@ -343,10 +348,13 @@ final class ADBModuleController {
             guard let transport = mavo_voice_create() else {
                 throw ControllerError.openFailed("无法初始化模块 ADB USB 通道。")
             }
-            let result = mavo_voice_open_interface_for_location(transport, locationID, 6)
+            let result = mavo_voice_open_control_interface_for_location(transport, locationID, 6)
             guard result == MAVO_MODEM_OK else {
                 let raw = String(cString: mavo_voice_last_error(transport))
                 mavo_voice_destroy(transport)
+                if result == kIOReturnExclusiveAccess {
+                    throw ControllerError.interfaceBusy
+                }
                 throw ControllerError.openFailed(
                     raw.isEmpty ? "无法打开模块 ADB interface 6。" : raw
                 )
@@ -610,5 +618,11 @@ final class ADBModuleController {
                     UInt32(bytes[offset + 3]) << 24
             }
         }
+    }
+
+    static func isInterfaceBusyError(_ error: Error) -> Bool {
+        guard let controllerError = error as? ControllerError else { return false }
+        if case .interfaceBusy = controllerError { return true }
+        return false
     }
 }

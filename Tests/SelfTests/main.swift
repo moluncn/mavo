@@ -857,6 +857,59 @@ do {
         usbIdentity: "2C7C:0125",
         usbNetMode: 1
     )
+    var nonPrioritizedNetwork = recoverableNetwork
+    nonPrioritizedNetwork.serviceID = "cellular-service"
+    nonPrioritizedNetwork.isPrioritized = false
+    try expect(
+        CellularNetworkPriorityPolicy.shouldAutoPromote(
+            network: nonPrioritizedNetwork,
+            modem: recoverableModem,
+            isChangingNetwork: false,
+            attemptedServiceID: nil
+        ),
+        "enabled ECM service did not request automatic priority"
+    )
+    try expect(
+        !CellularNetworkPriorityPolicy.shouldAutoPromote(
+            network: nonPrioritizedNetwork,
+            modem: recoverableModem,
+            isChangingNetwork: false,
+            attemptedServiceID: "cellular-service"
+        ),
+        "automatic priority retried the same service without a state change"
+    )
+    var prioritizedNetwork = nonPrioritizedNetwork
+    prioritizedNetwork.isPrioritized = true
+    try expect(
+        !CellularNetworkPriorityPolicy.shouldAutoPromote(
+            network: prioritizedNetwork,
+            modem: recoverableModem,
+            isChangingNetwork: false,
+            attemptedServiceID: nil
+        ),
+        "already prioritized ECM service requested another promotion"
+    )
+    try expect(
+        ModuleVoiceInitializationRetryPolicy.delay(forCompletedAttempts: 0) == 2 &&
+            ModuleVoiceInitializationRetryPolicy.delay(forCompletedAttempts: 1) == 5 &&
+            ModuleVoiceInitializationRetryPolicy.delay(forCompletedAttempts: 4) == 60 &&
+            ModuleVoiceInitializationRetryPolicy.delay(forCompletedAttempts: 5) == nil,
+        "module voice initialization retry schedule changed unexpectedly"
+    )
+    try expect(
+        !NetworkAddressClassifier.isUsableIPv4("169.254.10.30"),
+        "self-assigned IPv4 address was treated as usable cellular data"
+    )
+    try expect(
+        NetworkAddressClassifier.isUsableIPv4("192.168.225.25"),
+        "valid ECM DHCP address was rejected"
+    )
+    try expect(
+        !NetworkAddressClassifier.isUsableIPv4("127.0.0.1") &&
+            !NetworkAddressClassifier.isUsableIPv4("not-an-address") &&
+            !NetworkAddressClassifier.isUsableIPv4("300.1.1.1"),
+        "invalid or local-only IPv4 address was accepted"
+    )
     try expect(
         CellularLinkRecoveryPolicy.shouldAttempt(
             network: recoverableNetwork,

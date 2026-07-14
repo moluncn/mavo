@@ -125,6 +125,29 @@ int mavo_voice_open_interface_for_location(
     uint32_t location_id,
     uint8_t interface_number
 );
+/*
+ * Opens a specific control interface and, if another user-space client owns
+ * it, asks IOKit to transfer exclusive access. Intended for the module's ADB
+ * interface only; AT, ECM and audio callers should keep using normal opens.
+ */
+int mavo_voice_open_control_interface_for_location(
+    MaVoVoice *voice,
+    uint32_t location_id,
+    uint8_t interface_number
+);
+
+/*
+ * Reads the process owner recorded by IOUSBHostInterface as
+ * "pid <number>, <name>". Returns 1 when a process owner is present, otherwise
+ * zero. This does not open, close, seize, or otherwise mutate the interface.
+ */
+int mavo_usb_interface_owner_process(
+    uint32_t location_id,
+    uint8_t interface_number,
+    int32_t *process_id,
+    char *process_name,
+    size_t process_name_capacity
+);
 void mavo_voice_close(MaVoVoice *voice);
 int mavo_voice_is_open(const MaVoVoice *voice);
 

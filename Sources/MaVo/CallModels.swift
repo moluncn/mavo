@@ -58,6 +58,7 @@ struct CallSnapshot: Equatable {
     var startedAt: Date?
     var lastEndReason: CallEndReason?
     var lastError: String?
+    var controlInterfaceBusy = false
     var mediaCleanupPending = false
     var uacMedia: UACMediaSnapshot?
 

@@ -102,11 +102,20 @@ final class ModuleVoiceRuntime {
             "{ echo '模块 ECM 网关未就绪'; exit 23; }; " +
             "ps -A | grep -q '[d]nsmasq.*bridge0' || " +
             "{ echo '模块 DHCP 服务未运行'; exit 24; }; " +
-            "ip link set ecm0 down && sleep 1 && " +
-            "ip link set ecm0 up && ip link set bridge0 up && sleep 1 && " +
+            // Do not flap ecm0 here. Dropping a healthy carrier makes macOS
+            // discard its lease and also restarts this module's 15-second
+            // bridge forwarding delay, which can turn recovery into a loop.
+            "ip link set bridge0 up && ip link set ecm0 up && " +
             "test \"$(cat /sys/class/net/ecm0/carrier)\" = 1 || " +
-            "{ echo '模块 ECM carrier 未恢复'; exit 25; }"
-        let result = try controller.shellChecked(command, timeout: 10)
+            "{ echo '模块 ECM carrier 未恢复'; exit 25; }; " +
+            // A newly created bridge port still needs its forwarding delay.
+            // Healthy, already-forwarding links take the fast path and keep
+            // the current data plane completely undisturbed.
+            "if test \"$(cat /sys/class/net/bridge0/brif/ecm0/state 2>/dev/null)\" != 3; " +
+            "then n=0; while test \"$n\" -lt 16; do sleep 1; n=$((n+1)); done; fi; " +
+            "test \"$(cat /sys/class/net/bridge0/brif/ecm0/state 2>/dev/null)\" = 3 || " +
+            "{ echo '模块 ECM bridge 未进入转发状态'; exit 26; }"
+        let result = try controller.shellChecked(command, timeout: 30)
         guard result.status == 0 else {
             throw RuntimeError.moduleCommand(
                 result.output.isEmpty

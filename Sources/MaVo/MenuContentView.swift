@@ -362,7 +362,7 @@ struct MenuContentView: View {
                 )
                 Divider().frame(height: 34)
                 metric(
-                    icon: appState.network.isPrioritized ? "antenna.radiowaves.left.and.right" : "wifi",
+                    icon: networkPriorityIcon,
                     title: networkPriorityTitle,
                     detail: networkPriorityDetail
                 )
@@ -372,7 +372,7 @@ struct MenuContentView: View {
                appState.network.isHardwarePresent,
                 !appState.network.isPrioritized {
                 HStack {
-                    Text("蜂窝网络已开启，但 Wi‑Fi 目前仍然优先")
+                    Text("蜂窝网络已开启，但 \(higherPriorityNetworkName)目前仍然优先")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -561,15 +561,37 @@ struct MenuContentView: View {
                     }
                 }
             case .unavailable, .error:
-                HStack(spacing: 8) {
-                    Image(systemName: "phone.down.fill")
-                        .foregroundStyle(.secondary)
-                    Text(appState.call.lastError ?? (appState.modem.isConnected
-                        ? "模块未报告 USB 语音能力"
-                        : "插入模块后可使用蜂窝电话"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "phone.down.fill")
+                            .foregroundStyle(.secondary)
+                        Text(appState.call.lastError ?? (appState.modem.isConnected
+                            ? "模块未报告 USB 语音能力"
+                            : "插入模块后可使用蜂窝电话"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if appState.modem.isConnected {
+                        HStack {
+                            Spacer()
+                            if appState.call.controlInterfaceBusy {
+                                Button(role: .destructive) {
+                                    appState.forceReleaseCallControlInterface()
+                                } label: {
+                                    Label("结束占用并重试", systemImage: "xmark.app.fill")
+                                }
+                                .help("只结束当前占用模块 ADB 接口的应用，然后重试电话初始化")
+                                .adaptiveGlassButton()
+                                .controlSize(.small)
+                                .disabled(appState.isChangingCall)
+                            } else {
+                                Button("重试初始化") { appState.retryCallInitialization() }
+                                    .adaptiveGlassButton()
+                                    .controlSize(.small)
+                                    .disabled(appState.isChangingCall)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -813,16 +835,29 @@ struct MenuContentView: View {
     }
 
     private var networkPriorityTitle: String {
-        appState.network.isPrioritized ? "蜂窝网络优先" : "Wi‑Fi 保持优先"
+        appState.network.isPrioritized
+            ? "蜂窝网络优先"
+            : "\(higherPriorityNetworkName)保持优先"
     }
 
     private var networkPriorityDetail: String {
         if appState.network.isPrioritized {
-            return "已排在 Wi‑Fi 之前"
+            return "已排在其他网络之前"
         }
         return appState.network.isEnabled
             ? "可切换为蜂窝优先"
             : "开启后自动切换为蜂窝优先"
+    }
+
+    private var higherPriorityNetworkName: String {
+        appState.network.higherPriorityServiceName ?? "其他网络"
+    }
+
+    private var networkPriorityIcon: String {
+        if appState.network.isPrioritized {
+            return "antenna.radiowaves.left.and.right"
+        }
+        return higherPriorityNetworkName == "Wi‑Fi" ? "wifi" : "network"
     }
 
     private var contentGlassTreatment: AdaptiveGlassTreatment {

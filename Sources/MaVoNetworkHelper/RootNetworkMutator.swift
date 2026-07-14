@@ -153,12 +153,18 @@ final class RootNetworkMutator {
 
         if enabled, let interface = SCNetworkServiceGetInterface(service) {
             _ = SCNetworkInterfaceForceConfigurationRefresh(interface)
+            guard let bsdName = SCNetworkInterfaceGetBSDName(interface) as String? else {
+                return .failure("模块网络已启用，但无法读取 ECM 接口名称。")
+            }
+            if let error = renewDHCP(on: bsdName) {
+                return .failure("模块网络已启用，但 DHCP 刷新失败：\(error)")
+            }
         } else {
             try? stateStore.save(state)
         }
 
         if enabled {
-            return .success("已启用模块网络，并把它置于 Wi-Fi 之前。")
+            return .success("已启用模块网络，并把它置于所有其他网络服务之前。")
         }
         return didRestoreOrder
             ? .success("已从系统层禁用模块网络，并恢复原服务顺序。")
@@ -235,6 +241,48 @@ final class RootNetworkMutator {
         let code = SCError()
         guard code != kSCStatusOK else { return prefix }
         return "\(prefix)：\(String(cString: SCErrorString(code)))"
+    }
+
+    private func renewDHCP(on bsdName: String) -> String? {
+        guard usbIdentity(forBSDName: bsdName) == targetUSBIdentity else {
+            return "拒绝刷新非 QDC507 网络接口 \(bsdName)"
+        }
+
+        // Reapplying DHCP while configd has already fallen back to a
+        // 169.254/16 Link-Local address is not sufficient on macOS: ipconfig
+        // exits successfully, but the DHCP client can remain in INIT without
+        // transmitting a new request. Clear the per-interface method first so
+        // the subsequent DHCP command creates a fresh client session.
+        if let error = runIPConfig(method: "NONE", on: bsdName) {
+            return "重置 DHCP 客户端失败：\(error)"
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+        return runIPConfig(method: "DHCP", on: bsdName)
+    }
+
+    private func runIPConfig(method: String, on bsdName: String) -> String? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/ipconfig")
+        process.arguments = ["set", bsdName, method]
+        process.standardOutput = output
+        process.standardError = output
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return error.localizedDescription
+        }
+        guard process.terminationStatus == 0 else {
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let detail = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail?.isEmpty == false
+                ? detail
+                : "ipconfig \(method) 返回状态 \(process.terminationStatus)"
+        }
+        return nil
     }
 
     private struct USBIdentity: Equatable {

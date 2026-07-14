@@ -1188,7 +1188,8 @@ void mavo_voice_destroy(MaVoVoice *voice) {
 static int open_voice_at_location(
     MaVoVoice *voice,
     uint32_t location_id,
-    uint8_t interface_number
+    uint8_t interface_number,
+    int request_transfer_if_busy
 ) {
     if (voice == NULL) {
         return MAVO_MODEM_NOT_OPEN;
@@ -1248,9 +1249,19 @@ static int open_voice_at_location(
     }
 
     result = (*interface)->USBInterfaceOpen(interface);
+    if (result == kIOReturnExclusiveAccess && request_transfer_if_busy) {
+        result = (*interface)->USBInterfaceOpenSeize(interface);
+    }
     if (result != kIOReturnSuccess) {
         char operation[64];
-        snprintf(operation, sizeof(operation), "open USB interface %u", interface_number);
+        snprintf(
+            operation,
+            sizeof(operation),
+            request_transfer_if_busy
+                ? "claim USB control interface %u"
+                : "open USB interface %u",
+            interface_number
+        );
         set_voice_io_error(voice, operation, result);
         (*interface)->Release(interface);
         return (int)result;
@@ -1268,7 +1279,7 @@ static int open_voice_at_location(
 }
 
 int mavo_voice_open(MaVoVoice *voice) {
-    return open_voice_at_location(voice, 0, MAVO_VOICE_INTERFACE);
+    return open_voice_at_location(voice, 0, MAVO_VOICE_INTERFACE, 0);
 }
 
 int mavo_voice_open_for_location(MaVoVoice *voice, uint32_t location_id) {
@@ -1279,11 +1290,11 @@ int mavo_voice_open_for_location(MaVoVoice *voice, uint32_t location_id) {
         set_voice_error(voice, "voice locationID must be non-zero");
         return (int)kIOReturnBadArgument;
     }
-    return open_voice_at_location(voice, location_id, MAVO_VOICE_INTERFACE);
+    return open_voice_at_location(voice, location_id, MAVO_VOICE_INTERFACE, 0);
 }
 
 int mavo_voice_open_interface(MaVoVoice *voice, uint8_t interface_number) {
-    return open_voice_at_location(voice, 0, interface_number);
+    return open_voice_at_location(voice, 0, interface_number, 0);
 }
 
 int mavo_voice_open_interface_for_location(
@@ -1298,7 +1309,90 @@ int mavo_voice_open_interface_for_location(
         set_voice_error(voice, "USB interface locationID must be non-zero");
         return (int)kIOReturnBadArgument;
     }
-    return open_voice_at_location(voice, location_id, interface_number);
+    return open_voice_at_location(voice, location_id, interface_number, 0);
+}
+
+int mavo_voice_open_control_interface_for_location(
+    MaVoVoice *voice,
+    uint32_t location_id,
+    uint8_t interface_number
+) {
+    if (voice == NULL) {
+        return MAVO_MODEM_NOT_OPEN;
+    }
+    if (location_id == 0) {
+        set_voice_error(voice, "USB control interface locationID must be non-zero");
+        return (int)kIOReturnBadArgument;
+    }
+    return open_voice_at_location(voice, location_id, interface_number, 1);
+}
+
+int mavo_usb_interface_owner_process(
+    uint32_t location_id,
+    uint8_t interface_number,
+    int32_t *process_id,
+    char *process_name,
+    size_t process_name_capacity
+) {
+    if (process_id != NULL) {
+        *process_id = 0;
+    }
+    if (process_name != NULL && process_name_capacity > 0) {
+        process_name[0] = '\0';
+    }
+    if (location_id == 0 || process_id == NULL ||
+        process_name == NULL || process_name_capacity < 2) {
+        return 0;
+    }
+
+    uint16_t vendor_id = 0;
+    uint16_t product_id = 0;
+    io_service_t service = find_known_interface(
+        interface_number,
+        location_id,
+        &vendor_id,
+        &product_id,
+        NULL,
+        NULL
+    );
+    if (service == IO_OBJECT_NULL) {
+        return 0;
+    }
+    CFTypeRef property = IORegistryEntryCreateCFProperty(
+        service,
+        CFSTR("UsbExclusiveOwner"),
+        kCFAllocatorDefault,
+        0
+    );
+    IOObjectRelease(service);
+    if (property == NULL || CFGetTypeID(property) != CFStringGetTypeID()) {
+        if (property != NULL) {
+            CFRelease(property);
+        }
+        return 0;
+    }
+
+    char owner[256] = {0};
+    Boolean converted = CFStringGetCString(
+        (CFStringRef)property,
+        owner,
+        sizeof(owner),
+        kCFStringEncodingUTF8
+    );
+    CFRelease(property);
+    if (!converted) {
+        return 0;
+    }
+
+    int parsed_pid = 0;
+    char parsed_name[192] = {0};
+    if (sscanf(owner, "pid %d, %191[^\n]", &parsed_pid, parsed_name) != 2 ||
+        parsed_pid <= 0 || parsed_name[0] == '\0') {
+        return 0;
+    }
+    *process_id = (int32_t)parsed_pid;
+    snprintf(process_name, process_name_capacity, "%s", parsed_name);
+    return 1;
 }
 
 int mavo_voice_is_open(const MaVoVoice *voice) {

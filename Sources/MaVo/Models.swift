@@ -135,6 +135,7 @@ enum ModemInitialSetupState: Equatable {
 struct CellularNetworkStatus: Equatable {
     var serviceID: String?
     var serviceName: String?
+    var higherPriorityServiceName: String?
     var bsdName: String?
     var isEnabled = false
     var isActive = false
@@ -142,11 +143,59 @@ struct CellularNetworkStatus: Equatable {
     var isPrioritized = false
     var isHardwarePresent = false
     var ipv4Address: String?
+    var ipv4Router: String?
     var ipv6Address: String?
     var lastError: String?
 
     var isAvailable: Bool {
         serviceID != nil
+    }
+}
+
+enum NetworkAddressClassifier {
+    static func isUsableIPv4(_ address: String) -> Bool {
+        let octets = address.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return false }
+        let values = octets.compactMap { component -> Int? in
+            guard !component.isEmpty,
+                  component.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                  let value = Int(component),
+                  (0 ... 255).contains(value) else {
+                return nil
+            }
+            return value
+        }
+        guard values.count == 4 else { return false }
+        if values[0] == 0 || values[0] == 127 || values[0] >= 224 { return false }
+        if values[0] == 169 && values[1] == 254 { return false }
+        return true
+    }
+}
+
+enum CellularNetworkPriorityPolicy {
+    static func shouldAutoPromote(
+        network: CellularNetworkStatus,
+        modem: ModemSnapshot,
+        isChangingNetwork: Bool,
+        attemptedServiceID: String?
+    ) -> Bool {
+        guard let serviceID = network.serviceID else { return false }
+        return network.isEnabled &&
+            network.isHardwarePresent &&
+            !network.isPrioritized &&
+            modem.isConnected &&
+            modem.usbNetMode == 1 &&
+            !isChangingNetwork &&
+            attemptedServiceID != serviceID
+    }
+}
+
+enum ModuleVoiceInitializationRetryPolicy {
+    private static let delays: [TimeInterval] = [2, 5, 10, 30, 60]
+
+    static func delay(forCompletedAttempts attempts: Int) -> TimeInterval? {
+        guard delays.indices.contains(attempts) else { return nil }
+        return delays[attempts]
     }
 }
 

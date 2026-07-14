@@ -789,11 +789,13 @@ struct MenuContentView: View {
 
     private var networkConnectionIcon: String {
         if !appState.network.isEnabled { return "antenna.radiowaves.left.and.right.slash" }
+        if appState.isRecoveringNetworkLink { return "arrow.clockwise.circle.fill" }
         return appState.network.isActive ? "checkmark.circle.fill" : "clock"
     }
 
     private var networkConnectionTitle: String {
         if !appState.network.isEnabled { return "蜂窝网络未启用" }
+        if appState.isRecoveringNetworkLink { return "正在恢复蜂窝数据" }
         return appState.network.isActive ? "蜂窝数据已连接" : "正在连接蜂窝数据"
     }
 
@@ -804,7 +806,10 @@ struct MenuContentView: View {
         if appState.network.isActive {
             return appState.modem.operatorName ?? "正在通过蜂窝网络联网"
         }
-        return "等待运营商分配网络地址"
+        if appState.isRecoveringNetworkLink || !appState.network.isLinkActive {
+            return "正在重新连接模块与 Mac"
+        }
+        return "正在从模块获取网络地址"
     }
 
     private var networkPriorityTitle: String {

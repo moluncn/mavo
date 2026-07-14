@@ -251,6 +251,44 @@ final class ModemService {
         }
     }
 
+    func recoverCellularNetworkLink(completion: @escaping (ModemActionResult) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.isOpen,
+                  self.snapshot.usbIdentity?.uppercased() == "2C7C:0125",
+                  self.snapshot.usbNetMode == 1,
+                  self.modemLocationID != 0 else {
+                DispatchQueue.main.async {
+                    completion(.failure("模块 ECM 接口尚未就绪。"))
+                }
+                return
+            }
+            guard !self.callSnapshot.hasCall,
+                  !self.hasPendingMediaCleanup,
+                  !self.callActionInFlight else {
+                DispatchQueue.main.async {
+                    completion(.failure("通话期间不会重置模块网络链路。"))
+                }
+                return
+            }
+
+            do {
+                let runtime: ModuleVoiceRuntime
+                if let existing = self.moduleVoiceRuntime {
+                    runtime = existing
+                } else {
+                    runtime = try ModuleVoiceRuntime(locationID: self.modemLocationID)
+                    self.moduleVoiceRuntime = runtime
+                }
+                try runtime.recoverECMNetworkLink()
+                DispatchQueue.main.async { completion(.success()) }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure("模块网络链路恢复失败：\(error.localizedDescription)"))
+                }
+            }
+        }
+    }
+
     func executeAT(
         _ rawCommand: String,
         completion: @escaping (ATConsoleExecutionResult) -> Void

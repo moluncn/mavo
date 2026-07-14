@@ -84,7 +84,10 @@ final class NetworkServiceController {
         let interface = SCNetworkServiceGetInterface(service)
         let bsdName = interface.flatMap { SCNetworkInterfaceGetBSDName($0) as String? }
         let order = (SCNetworkSetGetServiceOrder(networkSet) as? [String]) ?? []
-        let activeAddress = bsdName.flatMap(activeIPv4Address)
+        let activeIPv4 = bsdName.flatMap(activeIPv4Address)
+        let activeIPv6 = bsdName.flatMap(activeGlobalIPv6Address)
+        let linkActive = bsdName.flatMap(activeLinkStatus) ??
+            (activeIPv4 != nil || activeIPv6 != nil)
         if liveService != nil,
            let serviceID,
            let bsdName,
@@ -97,10 +100,12 @@ final class NetworkServiceController {
             serviceName: serviceName,
             bsdName: bsdName,
             isEnabled: SCNetworkServiceGetEnabled(service),
-            isActive: activeAddress != nil,
+            isActive: linkActive && (activeIPv4 != nil || activeIPv6 != nil),
+            isLinkActive: linkActive,
             isPrioritized: serviceID.map { order.first == $0 } ?? false,
             isHardwarePresent: liveInterface != nil,
-            ipv4Address: activeAddress,
+            ipv4Address: activeIPv4,
+            ipv6Address: activeIPv6,
             lastError: nil
         )
     }
@@ -167,6 +172,28 @@ final class NetworkServiceController {
             return nil
         }
         return addresses.first
+    }
+
+    private func activeGlobalIPv6Address(forBSDName bsdName: String) -> String? {
+        let key = "State:/Network/Interface/\(bsdName)/IPv6" as NSString
+        guard let value = SCDynamicStoreCopyValue(nil, key),
+              let dictionary = value as? [String: Any],
+              let addresses = dictionary["Addresses"] as? [String] else {
+            return nil
+        }
+        return addresses.first { address in
+            let normalized = address.lowercased()
+            return normalized != "::1" && !normalized.hasPrefix("fe80:")
+        }
+    }
+
+    private func activeLinkStatus(forBSDName bsdName: String) -> Bool? {
+        let key = "State:/Network/Interface/\(bsdName)/Link" as NSString
+        guard let value = SCDynamicStoreCopyValue(nil, key),
+              let dictionary = value as? [String: Any] else {
+            return nil
+        }
+        return dictionary["Active"] as? Bool
     }
 
     private func systemConfigurationError(_ prefix: String) -> String {

@@ -18,6 +18,7 @@ swiftc \
   "$ROOT/Sources/MaVo/LaunchAtLoginController.swift" \
   "$ROOT/Sources/MaVo/ADBProtocol.swift" \
   "$ROOT/Sources/MaVo/Models.swift" \
+  "$ROOT/Sources/MaVo/CellularLinkRecovery.swift" \
   "$ROOT/Sources/MaVo/DeletedMessageRegistry.swift" \
   "$ROOT/Sources/MaVo/ATResponseParser.swift" \
   "$ROOT/Sources/MaVo/SMSPDUDecoder.swift" \

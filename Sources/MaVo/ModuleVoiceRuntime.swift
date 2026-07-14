@@ -92,6 +92,30 @@ final class ModuleVoiceRuntime {
         }
     }
 
+    func recoverECMNetworkLink() throws {
+        let command =
+            "test -d /sys/class/net/ecm0 || { echo '模块缺少 ecm0'; exit 20; }; " +
+            "test -d /sys/class/net/bridge0 || { echo '模块缺少 bridge0'; exit 21; }; " +
+            "ip -o link show ecm0 | grep -q 'master bridge0' || " +
+            "{ echo 'ecm0 未连接到 bridge0'; exit 22; }; " +
+            "ip -o -4 addr show bridge0 | grep -q '192\\.168\\.225\\.1/24' || " +
+            "{ echo '模块 ECM 网关未就绪'; exit 23; }; " +
+            "ps -A | grep -q '[d]nsmasq.*bridge0' || " +
+            "{ echo '模块 DHCP 服务未运行'; exit 24; }; " +
+            "ip link set ecm0 down && sleep 1 && " +
+            "ip link set ecm0 up && ip link set bridge0 up && sleep 1 && " +
+            "test \"$(cat /sys/class/net/ecm0/carrier)\" = 1 || " +
+            "{ echo '模块 ECM carrier 未恢复'; exit 25; }"
+        let result = try controller.shellChecked(command, timeout: 10)
+        guard result.status == 0 else {
+            throw RuntimeError.moduleCommand(
+                result.output.isEmpty
+                    ? "模块 ECM 链路恢复返回状态 \(result.status)。"
+                    : result.output
+            )
+        }
+    }
+
     func prepare() throws -> String {
         if prepared { return manifest.runtimeVersion }
         try probeControlChannel()

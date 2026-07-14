@@ -138,9 +138,11 @@ struct CellularNetworkStatus: Equatable {
     var bsdName: String?
     var isEnabled = false
     var isActive = false
+    var isLinkActive = false
     var isPrioritized = false
     var isHardwarePresent = false
     var ipv4Address: String?
+    var ipv6Address: String?
     var lastError: String?
 
     var isAvailable: Bool {

@@ -846,6 +846,65 @@ do {
         CarrierNameFormatter.localized("Vodafone UK") == "Vodafone UK",
         "unknown carrier name should be preserved"
     )
+    let recoverableNetwork = CellularNetworkStatus(
+        isEnabled: true,
+        isActive: false,
+        isLinkActive: false,
+        isHardwarePresent: true
+    )
+    let recoverableModem = ModemSnapshot(
+        state: .connected,
+        usbIdentity: "2C7C:0125",
+        usbNetMode: 1
+    )
+    try expect(
+        CellularLinkRecoveryPolicy.shouldAttempt(
+            network: recoverableNetwork,
+            modem: recoverableModem,
+            hasCall: false,
+            isInFlight: false,
+            completedAttempts: 0
+        ),
+        "inactive ECM link did not request recovery"
+    )
+    var activeNetwork = recoverableNetwork
+    activeNetwork.isActive = true
+    try expect(
+        !CellularLinkRecoveryPolicy.shouldAttempt(
+            network: activeNetwork,
+            modem: recoverableModem,
+            hasCall: false,
+            isInFlight: false,
+            completedAttempts: 0
+        ),
+        "active cellular network requested recovery"
+    )
+    try expect(
+        !CellularLinkRecoveryPolicy.shouldAttempt(
+            network: recoverableNetwork,
+            modem: recoverableModem,
+            hasCall: true,
+            isInFlight: false,
+            completedAttempts: 0
+        ),
+        "active call allowed ECM recovery"
+    )
+    try expect(
+        !CellularLinkRecoveryPolicy.shouldAttempt(
+            network: recoverableNetwork,
+            modem: recoverableModem,
+            hasCall: false,
+            isInFlight: false,
+            completedAttempts: CellularLinkRecoveryPolicy.maximumAttempts
+        ),
+        "ECM recovery ignored its attempt limit"
+    )
+    try expect(
+        CellularLinkRecoveryPolicy.delayNanoseconds(completedAttempts: 0) == 3_000_000_000 &&
+            CellularLinkRecoveryPolicy.delayNanoseconds(completedAttempts: 1) == 15_000_000_000 &&
+            CellularLinkRecoveryPolicy.delayNanoseconds(completedAttempts: 2) == 30_000_000_000,
+        "ECM recovery backoff changed unexpectedly"
+    )
 
     print("MaVo self-tests passed (calls, PDU/UDH, CMGL/URC framing, buffering, storage, merge).")
 } catch {

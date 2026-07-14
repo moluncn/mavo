@@ -8,6 +8,7 @@ final class AppState: ObservableObject {
     @Published private(set) var messages: [SMSMessage] = []
     @Published private(set) var call = CallSnapshot()
     @Published var isChangingNetwork = false
+    @Published private(set) var isRecoveringNetworkLink = false
     @Published var isConfiguringECM = false
     @Published var isConvertingModuleIdentity = false
     @Published var isChangingCall = false
@@ -38,6 +39,9 @@ final class AppState: ObservableObject {
     private var verificationAutoDeleteTask: Task<Void, Never>?
     private var verificationAutoDeleteRetryDates: [SMSMessage.ID: Date] = [:]
     private var transientDismissalTask: Task<Void, Never>?
+    private var cellularLinkRecoveryTask: Task<Void, Never>?
+    private var cellularLinkRecoveryInFlight = false
+    private var completedCellularLinkRecoveryAttempts = 0
     private var initialSetupPromptTask: Task<Void, Never>?
     private var initialSetupWasPresentedForCurrentInsertion = false
     private var initialSetupPresentationIsActive = false
@@ -113,6 +117,7 @@ final class AppState: ObservableObject {
             let wasPhysicallyPresent = self.modem.state != .disconnected
             let wasDisconnected = self.modem.state == .disconnected
             self.modem = snapshot
+            self.scheduleCellularLinkRecoveryIfNeeded()
             if snapshot.state == .disconnected, wasPhysicallyPresent {
                 self.initialSetupWasPresentedForCurrentInsertion = false
             } else if wasDisconnected,
@@ -154,6 +159,7 @@ final class AppState: ObservableObject {
             let shouldNotify = snapshot.phase == .incoming &&
                 (self.call.phase != .incoming || self.call.number != snapshot.number)
             self.call = snapshot
+            self.scheduleCellularLinkRecoveryIfNeeded()
             if snapshot.phase == .incoming {
                 IncomingCallWindowController.shared.show(
                     number: snapshot.number,
@@ -177,7 +183,13 @@ final class AppState: ObservableObject {
             }
         }
         networkController.onStatus = { [weak self] status in
-            self?.network = status
+            guard let self else { return }
+            self.network = status
+            if status.isActive || !status.isEnabled || !status.isHardwarePresent {
+                self.cancelCellularLinkRecovery(resetAttempts: true)
+            } else {
+                self.scheduleCellularLinkRecoveryIfNeeded()
+            }
         }
 
         networkController.startMonitoring()
@@ -198,11 +210,114 @@ final class AppState: ObservableObject {
             return
         }
         isChangingNetwork = true
+        if enabled {
+            completedCellularLinkRecoveryAttempts = 0
+        } else {
+            cancelCellularLinkRecovery(resetAttempts: true)
+        }
         dismissTransientMessage()
         networkController.setEnabled(enabled) { [weak self] result in
             guard let self else { return }
             self.isChangingNetwork = false
             self.show(result)
+        }
+    }
+
+    private func scheduleCellularLinkRecoveryIfNeeded() {
+        guard cellularLinkRecoveryTask == nil,
+              CellularLinkRecoveryPolicy.shouldAttempt(
+                  network: network,
+                  modem: modem,
+                  hasCall: call.hasCall,
+                  isInFlight: cellularLinkRecoveryInFlight,
+                  completedAttempts: completedCellularLinkRecoveryAttempts
+              ) else {
+            return
+        }
+        let delay = CellularLinkRecoveryPolicy.delayNanoseconds(
+            completedAttempts: completedCellularLinkRecoveryAttempts
+        )
+        cellularLinkRecoveryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.cellularLinkRecoveryTask = nil
+            self.networkController.refresh()
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+            guard CellularLinkRecoveryPolicy.shouldAttempt(
+                network: self.network,
+                modem: self.modem,
+                hasCall: self.call.hasCall,
+                isInFlight: self.cellularLinkRecoveryInFlight,
+                completedAttempts: self.completedCellularLinkRecoveryAttempts
+            ) else {
+                return
+            }
+            self.performCellularLinkRecovery()
+        }
+    }
+
+    private func performCellularLinkRecovery() {
+        guard !cellularLinkRecoveryInFlight else { return }
+        cellularLinkRecoveryInFlight = true
+        isRecoveringNetworkLink = true
+        completedCellularLinkRecoveryAttempts += 1
+        modemService.recoverCellularNetworkLink { [weak self] result in
+            guard let self else { return }
+            self.cellularLinkRecoveryInFlight = false
+            self.isRecoveringNetworkLink = false
+            switch result {
+            case .success:
+                self.cellularLinkRecoveryTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(nanoseconds: 4_000_000_000)
+                    } catch {
+                        return
+                    }
+                    guard let self else { return }
+                    self.networkController.refresh()
+                    do {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    } catch {
+                        return
+                    }
+                    self.cellularLinkRecoveryTask = nil
+                    if !self.network.isActive {
+                        self.finishCellularLinkRecoveryAttempt()
+                    }
+                }
+            case let .failure(message):
+                self.finishCellularLinkRecoveryAttempt(error: message)
+            }
+        }
+    }
+
+    private func finishCellularLinkRecoveryAttempt(error: String? = nil) {
+        if completedCellularLinkRecoveryAttempts >= CellularLinkRecoveryPolicy.maximumAttempts {
+            presentTransientMessage(
+                error ?? "模块网络链路无法恢复，请拔下模块后重新插入。",
+                isError: true
+            )
+            return
+        }
+        scheduleCellularLinkRecoveryIfNeeded()
+    }
+
+    private func cancelCellularLinkRecovery(resetAttempts: Bool) {
+        cellularLinkRecoveryTask?.cancel()
+        cellularLinkRecoveryTask = nil
+        if !cellularLinkRecoveryInFlight {
+            isRecoveringNetworkLink = false
+        }
+        if resetAttempts {
+            completedCellularLinkRecoveryAttempts = 0
         }
     }
 
